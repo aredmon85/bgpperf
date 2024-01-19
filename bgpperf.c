@@ -283,7 +283,6 @@ int main(int argc, char *argv[]) {
 					printf("RIB-out (updates/second): %f\n",updates_per_sec);
 					exit(EXIT_SUCCESS);
 				};
-				break;
 				/*
 				   case 3: 
 				   printf("Notification message received\n");

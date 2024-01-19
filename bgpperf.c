@@ -89,13 +89,11 @@ void print_usage() {
 }
 void parse_message_header(int sockfd, struct header *hdr) {
 
-	int rx_bytes = read(sockfd, hdr, sizeof(struct header));
+	int rx_bytes = recv(sockfd, hdr, sizeof(struct header),MSG_WAITALL);
 	if (rx_bytes< 0) {
 		printf("parse_message_header: Recv failed\n");
 		exit(EXIT_FAILURE);
 	};
-	printf("parse_message_header received %d bytes\n",rx_bytes);
-	printf("Received message type %d with length %d\n",hdr->type,ntohs(hdr->len));
 }
 void handle_open_message(int sockfd, struct header *hdr, struct open_message *rx_open_msg) {
 	
@@ -115,12 +113,9 @@ void handle_open_message(int sockfd, struct header *hdr, struct open_message *rx
                 printf("handle_open_message: Recv failed\n");
                 exit(EXIT_FAILURE);
         };
-	printf("Received open message from peer in ASN: %d\n",ntohs(rx_open_msg->my_as));
-	printf("Peer's configured hold-timer: %d\n",ntohs(rx_open_msg->hold_time));
 }
 void handle_update_message(int sockfd, struct header *hdr, char *recv_buf) {
-	printf("Attempting to recv %ld bytes of update from buffer\n",(ntohs(hdr->len) - sizeof(struct header)));
-	recv(sockfd, recv_buf, (ntohs(hdr->len) - sizeof(struct header)),0);
+	recv(sockfd, recv_buf, (ntohs(hdr->len) - sizeof(struct header)),MSG_WAITALL);
 	//recv(sockfd, recv_buf, (ntohs(hdr->len) - sizeof(struct header)),0);
 }
 void handle_keepalive_message(int sockfd, struct header *hdr, struct keepalive_message *rx_keepalive_msg) {
@@ -132,6 +127,7 @@ int main(int argc, char *argv[]) {
 	uint32_t local_asn;
 	char* destination;
 	int option = 0;
+	struct timespec start, current, last_keepalive;
 	while((option = getopt(argc, argv, "p:c:m:h:")) != -1) {
 		switch(option) {
 			break;
@@ -240,7 +236,6 @@ int main(int argc, char *argv[]) {
 		printf("Failed to connect: %s\n", strerror(errno));
 		exit(EXIT_FAILURE);
 	};
-	printf("Sending open message of size %d\n", ntohs(open_msg_len));
 	int sent_bytes = (send(sockfd, datagram, open_msg_len, 0));
 
 	if(sent_bytes < 0) {
@@ -257,46 +252,64 @@ int main(int argc, char *argv[]) {
 	
 	
 	struct header *rx_hdr = (struct header *)malloc(sizeof(struct header));
-	
+	float updates_per_sec = 0.0;
+	clock_gettime(CLOCK_MONOTONIC_RAW,&start);	
 	for(;;) {
 		parse_message_header(sockfd,rx_hdr);
 		switch(rx_hdr->type) {
 			case 1:
-				printf("###Open message received\n");
 				handle_open_message(sockfd,rx_hdr,rx_open_msg);
 				if(rx_open_msg->hold_time < hold_time) {
 					hold_time = rx_open_msg->hold_time;
 					keepalive_interval = hold_time / 3;
 				}
 				sent_bytes = (send(sockfd, keepalive_msg, sizeof(struct keepalive_message), 0));
+				printf("BGP Established with peer %s in ASN %d with hold_time of %d\n", destination, ntohs(rx_open_msg->my_as), ntohs(rx_open_msg->hold_time));
+				clock_gettime(CLOCK_MONOTONIC_RAW,&last_keepalive);
 				sent_bytes = (send(sockfd, eor_msg, sizeof(struct eor_message), 0));
 				break;
 			case 2:
-				printf("###Update message received\n");
 				handle_update_message(sockfd,rx_hdr,recv_buf);
 				update_msg_count++;
 				update_byte_count = update_byte_count + ntohs(rx_hdr->len) + 19;
 				if(ntohs(rx_hdr->len) == 23) {
-					puts("###EOR Recieved!!!###");
-					printf("%ld total updates recievd\n",update_msg_count);
+					puts("###EOR Received!!!###");
+					printf("%ld total updates received\n",update_msg_count);
 					printf("%ld total update bytes received\n",update_byte_count);
+					clock_gettime(CLOCK_MONOTONIC_RAW,&current);
+					float diff_time = ((current.tv_sec - start.tv_sec) * 1000000 + (current.tv_nsec - start.tv_nsec) / 1000)/1000000.0;
+					printf("Total time: %f\n", diff_time);
+					updates_per_sec = (float)update_msg_count/diff_time;
+					printf("RIB-out (updates/second): %f\n",updates_per_sec);
+					exit(EXIT_SUCCESS);
 				};
 				break;
-			/*
+				/*
 				   case 3: 
 				   printf("Notification message received\n");
 				   handle_notification_message(sockfd,hdr,rx_notification_msg);
-			*/
+				   */
 			case 4:
-				printf("###Keepalive message received\n");
 				handle_keepalive_message(sockfd,rx_hdr,rx_keepalive_msg);
 				break;
 			default:
 				printf("Illegal message type %d received\n",rx_hdr->type);
 				printf("%ld total updates recievd\n",update_msg_count);
 				printf("%ld total update bytes received\n",update_byte_count);
+				clock_gettime(CLOCK_MONOTONIC_RAW,&current);
+				int diff_time = (current.tv_sec - start.tv_sec) * 1000000 + (current.tv_nsec - start.tv_nsec) / 1000;
+				printf("Total time: %d\n", diff_time);
 				exit(EXIT_FAILURE);
 		}
+		clock_gettime(CLOCK_MONOTONIC_RAW,&current);
+		
+		if((current.tv_sec - last_keepalive.tv_sec) > keepalive_interval) {
+			sent_bytes = (send(sockfd, keepalive_msg, sizeof(struct keepalive_message), 0));
+			clock_gettime(CLOCK_MONOTONIC_RAW,&last_keepalive);
+			puts("Sending keepalive");
+		}
+		
+		
 	}
 
 	printf("Actually sent %d number of bytes\n",sent_bytes);

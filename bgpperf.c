@@ -13,7 +13,7 @@
 #include <time.h>
 #include <arpa/inet.h>
 #include <errno.h>
-#define MAX_MESSAGE 4096
+#define MAX_MESSAGE 16384
 #define DEFAULT_PORT 179
 extern int errno;
 enum msg_type {
@@ -23,18 +23,22 @@ enum msg_type {
 	keepalive = 4,
 	route_refresh = 5
 };
+
 struct header {
         uint8_t marker[16];
         uint16_t len;
         uint8_t type;
 } __attribute__((packed));
+
 struct open_message {
 	uint8_t ver;
 	uint16_t my_as;
 	uint16_t hold_time;
 	uint32_t bgp_id;
 	uint8_t optional_params_len;
+} __attribute__((packed));
 
+struct capabilities {
 	uint8_t option_param_type;
 	uint8_t option_param_len;
 
@@ -66,6 +70,11 @@ struct keepalive_message {
 	uint8_t type;
 } __attribute__((packed));
 
+struct update_message {
+        uint16_t withdrawn_route_len;
+        uint16_t total_pa_len;
+} __attribute__((packed));
+
 struct eor_message {
         uint8_t marker[16];
         uint16_t len;
@@ -75,19 +84,47 @@ struct eor_message {
 } __attribute__((packed));
 
 
-
 void print_usage() {
-	printf("Usage: dpt <PEER_ADDRESS> <LOCAL_ASN> -s SOURCE_ADDRESS -p PEER_ASN -c CYCLES -m MSS\n");
+	printf("Usage: bgpperf <PEER_ADDRESS> <LOCAL_ASN> -s SOURCE_ADDRESS -p PEER_ASN -c CYCLES -m MSS\n");
 }
-int get_message_type(int sockfd, struct header *hdr) {
-	
-	if(recv(sockfd, hdr, sizeof(hdr), MSG_PEEK) < 0) {
-		printf("Recv failed\n");
+void parse_message_header(int sockfd, struct header *hdr) {
+
+	int rx_bytes = read(sockfd, hdr, sizeof(struct header));
+	if (rx_bytes< 0) {
+		printf("parse_message_header: Recv failed\n");
 		exit(EXIT_FAILURE);
 	};
-	printf("Message type received: %d\n", hdr->type);
-	printf("Message len received: %d\n", htons(hdr->len));
-	return hdr->type;
+	printf("parse_message_header received %d bytes\n",rx_bytes);
+	printf("Received message type %d with length %d\n",hdr->type,ntohs(hdr->len));
+}
+void handle_open_message(int sockfd, struct header *hdr, struct open_message *rx_open_msg) {
+	
+	int rx_bytes = 0;
+	rx_bytes = sizeof(struct open_message);
+	int rcv = 0;	
+	char buf[4096];
+	//Read the fixed length open message from the socket first, then the variable length capabilities
+	rcv = read(sockfd, rx_open_msg, rx_bytes);
+	if(rcv != rx_bytes) {
+		printf("handle_open_message: Open Struct Recv failed\n");
+		exit(EXIT_FAILURE);
+	};
+	rx_bytes = ntohs(hdr->len) - sizeof(struct open_message) - sizeof(struct header);
+        rcv = read(sockfd, buf, rx_bytes);
+	if(rcv != rx_bytes) {
+                printf("handle_open_message: Recv failed\n");
+                exit(EXIT_FAILURE);
+        };
+	printf("Received open message from peer in ASN: %d\n",ntohs(rx_open_msg->my_as));
+	printf("Peer's configured hold-timer: %d\n",ntohs(rx_open_msg->hold_time));
+}
+void handle_update_message(int sockfd, struct header *hdr, char *recv_buf) {
+	printf("Attempting to recv %ld bytes of update from buffer\n",(ntohs(hdr->len) - sizeof(struct header)));
+	recv(sockfd, recv_buf, (ntohs(hdr->len) - sizeof(struct header)),0);
+	//recv(sockfd, recv_buf, (ntohs(hdr->len) - sizeof(struct header)),0);
+}
+void handle_keepalive_message(int sockfd, struct header *hdr, struct keepalive_message *rx_keepalive_msg) {
+	recv(sockfd, rx_keepalive_msg, (ntohs(hdr->len) - sizeof(struct header)),0);
 }
 int main(int argc, char *argv[]) {
 	uint16_t cycles = 1;
@@ -120,7 +157,10 @@ int main(int argc, char *argv[]) {
 
 	char send_buf[MAX_MESSAGE];
 	char recv_buf[MAX_MESSAGE];
+	memset(recv_buf, 0, sizeof(recv_buf));
+	memset(send_buf, 0, sizeof(send_buf));
 	int sockfd;
+
 	struct sockaddr_in peer;
 	bzero((char *) &peer, sizeof(peer));
 
@@ -133,7 +173,9 @@ int main(int argc, char *argv[]) {
 	peer.sin_family = AF_INET;
 	peer.sin_addr.s_addr = inet_addr(destination);
 	peer.sin_port = htons(DEFAULT_PORT);        
-
+	
+	uint16_t hold_time = 180;
+	uint16_t keepalive_interval = (hold_time /3 );
         struct keepalive_message *keepalive_msg = (struct keepalive_message *)malloc(sizeof(struct keepalive_message));
         struct eor_message *eor_msg = (struct eor_message *)malloc(sizeof(struct eor_message));
 
@@ -146,10 +188,13 @@ int main(int argc, char *argv[]) {
         eor_msg->total_pa_len = 0;
 
 	char *datagram;
-        datagram = malloc(MAX_MESSAGE);
+	
+	datagram = malloc(MAX_MESSAGE);
         memset(datagram,0,MAX_MESSAGE);
 	struct header *hdr = (struct header *) datagram;
 	struct open_message *open_msg = (struct open_message *) (datagram + sizeof(struct header));
+	struct capabilities *caps = (struct capabilities *) (datagram + sizeof(struct header) + sizeof(struct open_message));
+
 	hdr->type = 1;
         for(int i = 0; i < 16; i++) {
                 hdr->marker[i] = 255;
@@ -159,36 +204,36 @@ int main(int argc, char *argv[]) {
 
         open_msg->ver = 4;
         open_msg->my_as = htons(local_asn);
-        open_msg->hold_time = htons(180);
+        open_msg->hold_time = htons(hold_time);
         open_msg->bgp_id = 33686018;
         open_msg->optional_params_len = 22;
 
-        open_msg->option_param_type = 2;
-        open_msg->option_param_len = 20;
+        caps->option_param_type = 2;
+        caps->option_param_len = 20;
 
-        open_msg->rr_cap_code = 2;
-        open_msg->rr_cap_len = 0;
+        caps->rr_cap_code = 2;
+        caps->rr_cap_len = 0;
 
-        open_msg->err_cap_code = 70;
-        open_msg->err_cap_len = 0;
+        caps->err_cap_code = 70;
+        caps->err_cap_len = 0;
 
-        open_msg->as4_as_code = 65;
-        open_msg->as4_as_len = 4;
-        open_msg->as4_as_local_as_1 = 0;
-        open_msg->as4_as_local_as_2 = htons(local_asn);
+        caps->as4_as_code = 65;
+        caps->as4_as_len = 4;
+        caps->as4_as_local_as_1 = 0;
+        caps->as4_as_local_as_2 = htons(local_asn);
 
-        open_msg->mp_cap_code = 1;
-        open_msg->mp_cap_param_len = 4;
-        open_msg->mp_cap_mp_extensions_afi = htons(1);
-        open_msg->mp_cap_mp_extensions_reserved = 0;
-        open_msg->mp_cap_mp_extensions_safi = 1;
+        caps->mp_cap_code = 1;
+        caps->mp_cap_param_len = 4;
+        caps->mp_cap_mp_extensions_afi = htons(1);
+        caps->mp_cap_mp_extensions_reserved = 0;
+        caps->mp_cap_mp_extensions_safi = 1;
 
-        open_msg->gr_cap_code = 64;
-        open_msg->gr_cap_len = 2;
-        open_msg->gr_cap_timers = htons(16684);
+        caps->gr_cap_code = 64;
+        caps->gr_cap_len = 2;
+        caps->gr_cap_timers = htons(16684);
 		
-	int open_msg_len = htons(sizeof(struct open_message) + sizeof(struct header));
-	hdr->len = open_msg_len;
+	int open_msg_len = sizeof(struct open_message) + sizeof(struct header) + sizeof(struct capabilities);
+	hdr->len = htons(open_msg_len);
 	printf("Attempting to connect to %s with a local ASN of %d and a MSS of %d for %d cycles\n",destination,local_asn,mss,cycles); 
 
 	if(connect(sockfd, (struct sockaddr *)&peer, sizeof(peer)) < 0) {	
@@ -202,18 +247,58 @@ int main(int argc, char *argv[]) {
 		printf("Failed to send: %s\n", strerror(errno));
 		exit(EXIT_FAILURE);
 	};
+	uint64_t update_msg_count = 0;
+	uint64_t update_byte_count = 0;	
+	struct open_message *rx_open_msg = (struct open_message *)malloc(sizeof(struct open_message));
+	
+	//struct update_message *rx_update_msg = (struct update_message *)malloc(sizeof(struct update_message));
+	//struct notification_message *rx_notification_msg = (struct notification_message *)malloc(sizeof(struct notification_message));
+	struct keepalive_message *rx_keepalive_msg = (struct keepalive_message *)malloc(sizeof(struct keepalive_message));
+	
+	
+	struct header *rx_hdr = (struct header *)malloc(sizeof(struct header));
+	
+	for(;;) {
+		parse_message_header(sockfd,rx_hdr);
+		switch(rx_hdr->type) {
+			case 1:
+				printf("###Open message received\n");
+				handle_open_message(sockfd,rx_hdr,rx_open_msg);
+				if(rx_open_msg->hold_time < hold_time) {
+					hold_time = rx_open_msg->hold_time;
+					keepalive_interval = hold_time / 3;
+				}
+				sent_bytes = (send(sockfd, keepalive_msg, sizeof(struct keepalive_message), 0));
+				sent_bytes = (send(sockfd, eor_msg, sizeof(struct eor_message), 0));
+				break;
+			case 2:
+				printf("###Update message received\n");
+				handle_update_message(sockfd,rx_hdr,recv_buf);
+				update_msg_count++;
+				update_byte_count = update_byte_count + ntohs(rx_hdr->len) + 19;
+				if(ntohs(rx_hdr->len) == 23) {
+					puts("###EOR Recieved!!!###");
+					printf("%ld total updates recievd\n",update_msg_count);
+					printf("%ld total update bytes received\n",update_byte_count);
+				};
+				break;
+			/*
+				   case 3: 
+				   printf("Notification message received\n");
+				   handle_notification_message(sockfd,hdr,rx_notification_msg);
+			*/
+			case 4:
+				printf("###Keepalive message received\n");
+				handle_keepalive_message(sockfd,rx_hdr,rx_keepalive_msg);
+				break;
+			default:
+				printf("Illegal message type %d received\n",rx_hdr->type);
+				printf("%ld total updates recievd\n",update_msg_count);
+				printf("%ld total update bytes received\n",update_byte_count);
+				exit(EXIT_FAILURE);
+		}
+	}
 
-	int recv_bytes = 0;
-	int type = get_message_type(sockfd,hdr);
-	printf("Received message type: %d\n",type);
-	recv_bytes = (recv(sockfd, recv_buf, sizeof(recv_buf), 0));
-	printf("Received %d bytes from peer\n",recv_bytes);	
-	sent_bytes = (send(sockfd, keepalive_msg, sizeof(struct keepalive_message), 0));
-        sent_bytes = (send(sockfd, eor_msg, sizeof(struct eor_message), 0));
-	
-	recv_bytes = (recv(sockfd, recv_buf, sizeof(recv_buf), 0));
-	sleep(30);
-	
 	printf("Actually sent %d number of bytes\n",sent_bytes);
 	close(sockfd);
 	exit(EXIT_SUCCESS);

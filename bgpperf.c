@@ -13,7 +13,7 @@
 #include <time.h>
 #include <arpa/inet.h>
 #include <errno.h>
-#define MAX_MESSAGE 16384
+#define MAX_MESSAGE 8192
 #define DEFAULT_PORT 179
 extern int errno;
 enum msg_type {
@@ -90,10 +90,11 @@ void print_usage() {
 void parse_message_header(int sockfd, struct header *hdr) {
 
 	int rx_bytes = recv(sockfd, hdr, sizeof(struct header),MSG_WAITALL);
-	if (rx_bytes< 0) {
+	if (rx_bytes != sizeof(struct header)) {
 		printf("parse_message_header: Recv failed\n");
 		exit(EXIT_FAILURE);
 	};
+	//printf("Received message with header length of %d\n",ntohs(hdr->len));
 }
 void handle_open_message(int sockfd, struct header *hdr, struct open_message *rx_open_msg) {
 	
@@ -114,12 +115,55 @@ void handle_open_message(int sockfd, struct header *hdr, struct open_message *rx
                 exit(EXIT_FAILURE);
         };
 }
-void handle_update_message(int sockfd, struct header *hdr, char *recv_buf) {
-	recv(sockfd, recv_buf, (ntohs(hdr->len) - sizeof(struct header)),MSG_WAITALL);
-	//recv(sockfd, recv_buf, (ntohs(hdr->len) - sizeof(struct header)),0);
+uint16_t get_byte_length(uint16_t prefix_len) {
+
+	if(prefix_len > 24) {
+		return 4;
+	} else if (prefix_len > 16) {
+		return 3;
+	} else if (prefix_len > 8) {
+		return 2;
+	} else if (prefix_len > 0) {
+		return 1;
+	}
+	return 0;
+}
+void print_ip(char *buf, uint16_t idx, uint16_t prefix_bytes) {
+
+	for(int i = 1; i <= prefix_bytes; i++) {
+		printf("%d.",(uint8_t)buf[idx+i]);
+	}
+	for(int i = 1; i <= (4 - prefix_bytes); i++) {
+		if(i == (4 - prefix_bytes)) {
+			printf("%d",0);
+		} else {
+			printf("%d.",0);
+		}
+	}
+	printf("/%d\n",buf[idx]);
+
+}
+uint16_t handle_update_message(int sockfd, struct header *hdr, char *recv_buf) {
+	uint16_t update_len = (ntohs(hdr->len)) - sizeof(struct header);
+	if(recv(sockfd, recv_buf, update_len,MSG_WAITALL) != update_len) {
+		printf("handle_update_message: Recv failed\n");
+		exit(EXIT_FAILURE);
+	}
+	uint16_t pa_len = (uint16_t)(ntohs((recv_buf[3] << 8) | recv_buf[2]));
+	uint16_t byte_count = update_len;
+	uint16_t current_bytes = sizeof(struct update_message) + pa_len;
+	uint16_t prefix_bytes = 0;
+	uint16_t prefix_count = 0;
+	if(pa_len > 0) {
+		while((current_bytes) != (byte_count)) {
+			prefix_bytes = get_byte_length(recv_buf[current_bytes]);
+			current_bytes = prefix_bytes + current_bytes + 1;
+			prefix_count++;
+		}
+	}
+	return prefix_count;
 }
 void handle_keepalive_message(int sockfd, struct header *hdr, struct keepalive_message *rx_keepalive_msg) {
-	recv(sockfd, rx_keepalive_msg, (ntohs(hdr->len) - sizeof(struct header)),0);
 }
 int main(int argc, char *argv[]) {
 	uint16_t cycles = 1;
@@ -248,11 +292,12 @@ int main(int argc, char *argv[]) {
 	
 	//struct update_message *rx_update_msg = (struct update_message *)malloc(sizeof(struct update_message));
 	//struct notification_message *rx_notification_msg = (struct notification_message *)malloc(sizeof(struct notification_message));
-	struct keepalive_message *rx_keepalive_msg = (struct keepalive_message *)malloc(sizeof(struct keepalive_message));
+	//struct keepalive_message *rx_keepalive_msg = (struct keepalive_message *)malloc(sizeof(struct keepalive_message));
 	
 	
 	struct header *rx_hdr = (struct header *)malloc(sizeof(struct header));
 	float updates_per_sec = 0.0;
+	uint32_t prefix_count = 0;
 	clock_gettime(CLOCK_MONOTONIC_RAW,&start);	
 	for(;;) {
 		parse_message_header(sockfd,rx_hdr);
@@ -269,9 +314,10 @@ int main(int argc, char *argv[]) {
 				sent_bytes = (send(sockfd, eor_msg, sizeof(struct eor_message), 0));
 				break;
 			case 2:
-				handle_update_message(sockfd,rx_hdr,recv_buf);
+				//printf("Update received with length: %d\n",ntohs(rx_hdr->len));
+				prefix_count = (handle_update_message(sockfd,rx_hdr,recv_buf) + prefix_count);
 				update_msg_count++;
-				update_byte_count = update_byte_count + ntohs(rx_hdr->len) + 19;
+				update_byte_count = update_byte_count + ntohs(rx_hdr->len) + sizeof(struct header);
 				if(ntohs(rx_hdr->len) == 23) {
 					puts("###EOR Received!!!###");
 					printf("%ld total updates received\n",update_msg_count);
@@ -281,19 +327,23 @@ int main(int argc, char *argv[]) {
 					printf("Total time: %f\n", diff_time);
 					updates_per_sec = (float)update_msg_count/diff_time;
 					printf("RIB-out (updates/second): %f\n",updates_per_sec);
+					printf("Total prefixes received: %d\n",prefix_count);
+					close(sockfd);
 					exit(EXIT_SUCCESS);
 				};
+				break;
 				/*
 				   case 3: 
 				   printf("Notification message received\n");
 				   handle_notification_message(sockfd,hdr,rx_notification_msg);
 				   */
 			case 4:
-				handle_keepalive_message(sockfd,rx_hdr,rx_keepalive_msg);
+				printf("Keepalive received\n");
+				//handle_keepalive_message(sockfd,rx_hdr,rx_keepalive_msg);
 				break;
 			default:
 				printf("Illegal message type %d received\n",rx_hdr->type);
-				printf("%ld total updates recievd\n",update_msg_count);
+				printf("%ld total updates received\n",update_msg_count);
 				printf("%ld total update bytes received\n",update_byte_count);
 				clock_gettime(CLOCK_MONOTONIC_RAW,&current);
 				int diff_time = (current.tv_sec - start.tv_sec) * 1000000 + (current.tv_nsec - start.tv_nsec) / 1000;

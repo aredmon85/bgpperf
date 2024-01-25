@@ -281,7 +281,6 @@ int main(int argc, char *argv[]) {
 	struct header *rx_hdr = (struct header *)malloc(sizeof(struct header));
 	float updates_per_sec = 0.0;
 	uint32_t prefix_count = 0;
-	clock_gettime(CLOCK_MONOTONIC_RAW,&start);	
 	for(;;) {
 		parse_message_header(sockfd,rx_hdr);
 		switch(rx_hdr->type) {
@@ -304,6 +303,9 @@ int main(int argc, char *argv[]) {
 			case 2:
 				prefix_count = (handle_update_message(sockfd,rx_hdr,recv_buf) + prefix_count);
 				update_msg_count++;
+				if(update_msg_count == 1) {
+					clock_gettime(CLOCK_MONOTONIC_RAW,&start);
+				};	
 				update_byte_count = update_byte_count + ntohs(rx_hdr->len) - sizeof(struct header);
 				if(ntohs(rx_hdr->len) == 23) {
 					puts("###EOR Received!!!###");

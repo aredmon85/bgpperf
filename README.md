@@ -1,4 +1,4 @@
-bgpperf was written to as a bare bones way measure BGP RIB-out I/O performance.
+bgpperf was written as a bare bones way to measure BGP RIB-out I/O performance.
 
 Supports IPv4 unicast.  
 

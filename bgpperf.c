@@ -13,7 +13,7 @@
 #include <time.h>
 #include <arpa/inet.h>
 #include <errno.h>
-#define MAX_MESSAGE 8192
+#define MAX_MESSAGE 4096
 #define DEFAULT_PORT 179
 extern int errno;
 enum msg_type {
@@ -88,35 +88,27 @@ void print_usage() {
 	printf("Usage: bgpperf <PEER_ADDRESS> <LOCAL_ASN> -s SOURCE_ADDRESS -c CYCLES -m MSS\n");
 }
 void parse_message_header(int sockfd, struct header *hdr) {
-
-	int rx_bytes = recv(sockfd, hdr, sizeof(struct header),MSG_WAITALL);
-	if (rx_bytes != sizeof(struct header)) {
+	if(recv(sockfd, hdr, sizeof(struct header),MSG_WAITALL) < sizeof(struct header)) {
 		printf("parse_message_header: Recv failed\n");
 		exit(EXIT_FAILURE);
 	};
-	//printf("Received message with header length of %d\n",ntohs(hdr->len));
 }
 void handle_open_message(int sockfd, struct header *hdr, struct open_message *rx_open_msg) {
 	
-	int rx_bytes = 0;
-	rx_bytes = sizeof(struct open_message);
-	int rcv = 0;	
+	uint16_t rx_bytes = sizeof(struct open_message);
 	char buf[4096];
 	//Read the fixed length open message from the socket first, then the variable length capabilities
-	rcv = read(sockfd, rx_open_msg, rx_bytes);
-	if(rcv != rx_bytes) {
+	if(read(sockfd, rx_open_msg, rx_bytes) < rx_bytes) {
 		printf("handle_open_message: Open Struct Recv failed\n");
 		exit(EXIT_FAILURE);
 	};
 	rx_bytes = ntohs(hdr->len) - sizeof(struct open_message) - sizeof(struct header);
-        rcv = read(sockfd, buf, rx_bytes);
-	if(rcv != rx_bytes) {
+        if(read(sockfd, buf, rx_bytes) < rx_bytes) {
                 printf("handle_open_message: Recv failed\n");
                 exit(EXIT_FAILURE);
         };
 }
-uint16_t get_byte_length(uint16_t prefix_len) {
-
+static inline uint16_t get_byte_length(uint16_t prefix_len) {
 	if(prefix_len > 24) {
 		return 4;
 	} else if (prefix_len > 16) {
@@ -270,7 +262,7 @@ int main(int argc, char *argv[]) {
         caps->gr_cap_len = 2;
         caps->gr_cap_timers = htons(16684);
 		
-	int open_msg_len = sizeof(struct open_message) + sizeof(struct header) + sizeof(struct capabilities);
+	uint16_t open_msg_len = sizeof(struct open_message) + sizeof(struct header) + sizeof(struct capabilities);
 	hdr->len = htons(open_msg_len);
 	printf("Attempting to connect to %s with a local ASN of %d and a MSS of %d for %d cycles\n",destination,local_asn,mss,cycles); 
 
@@ -278,9 +270,7 @@ int main(int argc, char *argv[]) {
 		printf("Failed to connect: %s\n", strerror(errno));
 		exit(EXIT_FAILURE);
 	};
-	int sent_bytes = (send(sockfd, datagram, open_msg_len, 0));
-
-	if(sent_bytes < 0) {
+	if(send(sockfd, datagram, open_msg_len, 0) < open_msg_len) {
 		printf("Failed to send: %s\n", strerror(errno));
 		exit(EXIT_FAILURE);
 	};
@@ -301,15 +291,20 @@ int main(int argc, char *argv[]) {
 					hold_time = rx_open_msg->hold_time;
 					keepalive_interval = hold_time / 3;
 				}
-				sent_bytes = (send(sockfd, keepalive_msg, sizeof(struct keepalive_message), 0));
+				if(send(sockfd, keepalive_msg, sizeof(struct keepalive_message), 0) < sizeof(struct keepalive_message)) {
+					printf("send keepalive failed\n");
+					exit(EXIT_FAILURE);
+				};
 				printf("BGP Established with peer %s in ASN %d with hold_time of %d\n", destination, ntohs(rx_open_msg->my_as), ntohs(rx_open_msg->hold_time));
 				clock_gettime(CLOCK_MONOTONIC_RAW,&last_keepalive);
-				sent_bytes = (send(sockfd, eor_msg, sizeof(struct eor_message), 0));
+				if(send(sockfd, eor_msg, sizeof(struct eor_message), 0) < sizeof(struct eor_message)) {
+					printf("send EOR message failed\n");
+				};
 				break;
 			case 2:
 				prefix_count = (handle_update_message(sockfd,rx_hdr,recv_buf) + prefix_count);
 				update_msg_count++;
-				update_byte_count = update_byte_count + ntohs(rx_hdr->len) + sizeof(struct header);
+				update_byte_count = update_byte_count + ntohs(rx_hdr->len) - sizeof(struct header);
 				if(ntohs(rx_hdr->len) == 23) {
 					puts("###EOR Received!!!###");
 					printf("%ld total updates received\n",update_msg_count);
@@ -343,15 +338,16 @@ int main(int argc, char *argv[]) {
 		clock_gettime(CLOCK_MONOTONIC_RAW,&current);
 		
 		if((current.tv_sec - last_keepalive.tv_sec) > keepalive_interval) {
-			sent_bytes = (send(sockfd, keepalive_msg, sizeof(struct keepalive_message), 0));
+			if(send(sockfd, keepalive_msg, sizeof(struct keepalive_message), 0) < sizeof(struct keepalive_message)) {
+				printf("send keepalive failed\n");
+				exit(EXIT_FAILURE);
+			};
 			clock_gettime(CLOCK_MONOTONIC_RAW,&last_keepalive);
 			puts("Sending keepalive");
 		}
 		
 		
 	}
-
-	printf("Actually sent %d number of bytes\n",sent_bytes);
 	close(sockfd);
 	exit(EXIT_SUCCESS);
 }

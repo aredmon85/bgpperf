@@ -85,7 +85,7 @@ struct eor_message {
 
 
 void print_usage() {
-	printf("Usage: bgpperf <PEER_ADDRESS> <LOCAL_ASN> -s SOURCE_ADDRESS -p PEER_ASN -c CYCLES -m MSS\n");
+	printf("Usage: bgpperf <PEER_ADDRESS> <LOCAL_ASN> -s SOURCE_ADDRESS -c CYCLES -m MSS\n");
 }
 void parse_message_header(int sockfd, struct header *hdr) {
 
@@ -162,8 +162,6 @@ uint16_t handle_update_message(int sockfd, struct header *hdr, char *recv_buf) {
 		}
 	}
 	return prefix_count;
-}
-void handle_keepalive_message(int sockfd, struct header *hdr, struct keepalive_message *rx_keepalive_msg) {
 }
 int main(int argc, char *argv[]) {
 	uint16_t cycles = 1;
@@ -290,11 +288,6 @@ int main(int argc, char *argv[]) {
 	uint64_t update_byte_count = 0;	
 	struct open_message *rx_open_msg = (struct open_message *)malloc(sizeof(struct open_message));
 	
-	//struct update_message *rx_update_msg = (struct update_message *)malloc(sizeof(struct update_message));
-	//struct notification_message *rx_notification_msg = (struct notification_message *)malloc(sizeof(struct notification_message));
-	//struct keepalive_message *rx_keepalive_msg = (struct keepalive_message *)malloc(sizeof(struct keepalive_message));
-	
-	
 	struct header *rx_hdr = (struct header *)malloc(sizeof(struct header));
 	float updates_per_sec = 0.0;
 	uint32_t prefix_count = 0;
@@ -314,7 +307,6 @@ int main(int argc, char *argv[]) {
 				sent_bytes = (send(sockfd, eor_msg, sizeof(struct eor_message), 0));
 				break;
 			case 2:
-				//printf("Update received with length: %d\n",ntohs(rx_hdr->len));
 				prefix_count = (handle_update_message(sockfd,rx_hdr,recv_buf) + prefix_count);
 				update_msg_count++;
 				update_byte_count = update_byte_count + ntohs(rx_hdr->len) + sizeof(struct header);
@@ -332,14 +324,12 @@ int main(int argc, char *argv[]) {
 					exit(EXIT_SUCCESS);
 				};
 				break;
-				/*
-				   case 3: 
-				   printf("Notification message received\n");
-				   handle_notification_message(sockfd,hdr,rx_notification_msg);
-				   */
+			case 3: 
+				printf("Notification message received\n");
+				close(sockfd);
+				exit(EXIT_FAILURE);	
 			case 4:
 				printf("Keepalive received\n");
-				//handle_keepalive_message(sockfd,rx_hdr,rx_keepalive_msg);
 				break;
 			default:
 				printf("Illegal message type %d received\n",rx_hdr->type);

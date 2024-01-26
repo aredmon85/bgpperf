@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -87,6 +88,16 @@ struct eor_message {
 void print_usage() {
 	printf("Usage: bgpperf <PEER_ADDRESS> <LOCAL_ASN> -s SOURCE_ADDRESS -c CYCLES -m MSS\n");
 }
+float get_variance(float valarr[], float avg, int vals) {
+	float variance = 0.0;
+	float sum = 0.0;
+	for(int i=0;i<vals;i++) {
+		sum = sum + pow((valarr[i] - avg),2);
+	}
+	variance = sum / (float)(vals - 1);
+	return variance;
+}
+
 void parse_message_header(int sockfd, struct header *hdr) {
 	if(recv(sockfd, hdr, sizeof(struct header),MSG_WAITALL) < sizeof(struct header)) {
 		printf("parse_message_header: Recv failed\n");
@@ -194,11 +205,7 @@ int main(int argc, char *argv[]) {
 	struct sockaddr_in peer;
 	bzero((char *) &peer, sizeof(peer));
 
-	sockfd = socket(AF_INET, SOCK_STREAM, 0);
-	if(setsockopt(sockfd, IPPROTO_TCP, TCP_MAXSEG, &mss, sizeof(mss)) < 0) {
-		printf("Failed to set socket options: %s\n", strerror(errno));
-		exit(EXIT_FAILURE);
-	};
+	
 	bzero(send_buf,sizeof(send_buf));
 	peer.sin_family = AF_INET;
 	peer.sin_addr.s_addr = inet_addr(destination);
@@ -261,95 +268,131 @@ int main(int argc, char *argv[]) {
         caps->gr_cap_code = 64;
         caps->gr_cap_len = 2;
         caps->gr_cap_timers = htons(16684);
-		
+	float diff_time;
+	uint64_t update_msg_count;
+	uint64_t update_byte_count;
+	float updates_per_sec;
+	uint32_t prefix_count;	
 	uint16_t open_msg_len = sizeof(struct open_message) + sizeof(struct header) + sizeof(struct capabilities);
 	hdr->len = htons(open_msg_len);
-	printf("Attempting to connect to %s with a local ASN of %d and a MSS of %d for %d cycles\n",destination,local_asn,mss,cycles); 
-
-	if(connect(sockfd, (struct sockaddr *)&peer, sizeof(peer)) < 0) {	
-		printf("Failed to connect: %s\n", strerror(errno));
-		exit(EXIT_FAILURE);
-	};
-	if(send(sockfd, datagram, open_msg_len, 0) < open_msg_len) {
-		printf("Failed to send: %s\n", strerror(errno));
-		exit(EXIT_FAILURE);
-	};
-	uint64_t update_msg_count = 0;
-	uint64_t update_byte_count = 0;	
-	struct open_message *rx_open_msg = (struct open_message *)malloc(sizeof(struct open_message));
 	
-	struct header *rx_hdr = (struct header *)malloc(sizeof(struct header));
-	float updates_per_sec = 0.0;
-	uint32_t prefix_count = 0;
-	for(;;) {
-		parse_message_header(sockfd,rx_hdr);
-		switch(rx_hdr->type) {
-			case 1:
-				handle_open_message(sockfd,rx_hdr,rx_open_msg);
-				if(rx_open_msg->hold_time < hold_time) {
-					hold_time = rx_open_msg->hold_time;
-					keepalive_interval = hold_time / 3;
-				}
+	float total_updates_per_sec;
+	float total_diff_time;
+	float total_prefix_count;
+	float total_update_msg_count;
+
+	float diff_times[cycles];
+	float updates_per_sec_arr[cycles];
+	printf("Attempting to connect to %s with a local ASN of %d and a MSS of %d for %d cycles\n",destination,local_asn,mss,cycles); 
+	uint8_t session;
+	for(int current_cycle=0; current_cycle<cycles; current_cycle++) {
+		session = 1;
+		
+		sockfd = socket(AF_INET, SOCK_STREAM, 0);
+		if(setsockopt(sockfd, IPPROTO_TCP, TCP_MAXSEG, &mss, sizeof(mss)) < 0) {
+			printf("Failed to set socket options: %s\n", strerror(errno));
+			exit(EXIT_FAILURE);
+		};
+		if(connect(sockfd, (struct sockaddr *)&peer, sizeof(peer)) < 0) {	
+			printf("Failed to connect: %s\n", strerror(errno));
+			exit(EXIT_FAILURE);
+		};
+		if(send(sockfd, datagram, open_msg_len, 0) < open_msg_len) {
+			printf("Failed to send: %s\n", strerror(errno));
+			exit(EXIT_FAILURE);
+		};
+		update_msg_count = 0;
+		update_byte_count = 0;	
+		struct open_message *rx_open_msg = (struct open_message *)malloc(sizeof(struct open_message));
+
+		struct header *rx_hdr = (struct header *)malloc(sizeof(struct header));
+		updates_per_sec = 0.0;
+		prefix_count = 0;
+		while(session == 1) {
+			parse_message_header(sockfd,rx_hdr);
+			switch(rx_hdr->type) {
+				case 1:
+					handle_open_message(sockfd,rx_hdr,rx_open_msg);
+					if(rx_open_msg->hold_time < hold_time) {
+						hold_time = rx_open_msg->hold_time;
+						keepalive_interval = hold_time / 3;
+					}
+					if(send(sockfd, keepalive_msg, sizeof(struct keepalive_message), 0) < sizeof(struct keepalive_message)) {
+						printf("send keepalive failed\n");
+						exit(EXIT_FAILURE);
+					};
+					if(ntohs(rx_open_msg->my_as) == local_asn) {
+						printf("Cycle: %d IBGP Established with peer %s in ASN %d with hold_time of %d...", (current_cycle+1),destination, ntohs(rx_open_msg->my_as), ntohs(rx_open_msg->hold_time));
+					}  else {
+						printf("Cycle: %d EBGP Established with peer %s in ASN %d with hold_time of %d...", (current_cycle+1),destination, ntohs(rx_open_msg->my_as), ntohs(rx_open_msg->hold_time));
+					};
+					clock_gettime(CLOCK_MONOTONIC_RAW,&last_keepalive);
+					if(send(sockfd, eor_msg, sizeof(struct eor_message), 0) < sizeof(struct eor_message)) {
+						printf("send EOR message failed\n");
+					};
+					break;
+				case 2:
+					if(update_msg_count == 0) {
+						clock_gettime(CLOCK_MONOTONIC_RAW,&start);
+					};	
+					prefix_count = (handle_update_message(sockfd,rx_hdr,recv_buf) + prefix_count);
+					update_msg_count++;
+					update_byte_count = update_byte_count + ntohs(rx_hdr->len) - sizeof(struct header);
+					if(ntohs(rx_hdr->len) == 23) {
+						//puts("###EOR Received!!!###");
+						//printf("%ld total updates received\n",update_msg_count);
+						//printf("%ld total update bytes received\n",update_byte_count);
+						printf("Complete!\n");
+						clock_gettime(CLOCK_MONOTONIC_RAW,&current);
+						diff_time = ((current.tv_sec - start.tv_sec) * 1000000 + (current.tv_nsec - start.tv_nsec) / 1000)/1000000.0;
+						//printf("Total time: %f\n", diff_time);
+						diff_times[current_cycle] = diff_time;
+						updates_per_sec = (float)update_msg_count/diff_time;
+						updates_per_sec_arr[current_cycle] = updates_per_sec;
+						//printf("Total prefixes received: %d\n",prefix_count);
+						total_prefix_count = total_prefix_count + prefix_count;
+						total_update_msg_count = total_update_msg_count + update_msg_count;
+						total_diff_time = diff_time + total_diff_time;
+						total_updates_per_sec = total_updates_per_sec + updates_per_sec;
+						close(sockfd);
+						session = 0;
+					};
+					break;
+				case 3: 
+					printf("Notification message received\n");
+					close(sockfd);
+					exit(EXIT_FAILURE);	
+				case 4:
+					break;
+				default:
+					printf("Illegal message type %d received\n",rx_hdr->type);
+					printf("%ld total updates received\n",update_msg_count);
+					printf("%ld total update bytes received\n",update_byte_count);
+					clock_gettime(CLOCK_MONOTONIC_RAW,&current);
+					int diff_time = (current.tv_sec - start.tv_sec) * 1000000 + (current.tv_nsec - start.tv_nsec) / 1000;
+					printf("Total time: %d\n", diff_time);
+					exit(EXIT_FAILURE);
+			}
+			clock_gettime(CLOCK_MONOTONIC_RAW,&current);
+
+			if((current.tv_sec - last_keepalive.tv_sec) > keepalive_interval) {
 				if(send(sockfd, keepalive_msg, sizeof(struct keepalive_message), 0) < sizeof(struct keepalive_message)) {
 					printf("send keepalive failed\n");
 					exit(EXIT_FAILURE);
 				};
-				printf("BGP Established with peer %s in ASN %d with hold_time of %d\n", destination, ntohs(rx_open_msg->my_as), ntohs(rx_open_msg->hold_time));
 				clock_gettime(CLOCK_MONOTONIC_RAW,&last_keepalive);
-				if(send(sockfd, eor_msg, sizeof(struct eor_message), 0) < sizeof(struct eor_message)) {
-					printf("send EOR message failed\n");
-				};
-				break;
-			case 2:
-				if(update_msg_count == 0) {
-					clock_gettime(CLOCK_MONOTONIC_RAW,&start);
-				};	
-				prefix_count = (handle_update_message(sockfd,rx_hdr,recv_buf) + prefix_count);
-				update_msg_count++;
-				update_byte_count = update_byte_count + ntohs(rx_hdr->len) - sizeof(struct header);
-				if(ntohs(rx_hdr->len) == 23) {
-					puts("###EOR Received!!!###");
-					printf("%ld total updates received\n",update_msg_count);
-					printf("%ld total update bytes received\n",update_byte_count);
-					clock_gettime(CLOCK_MONOTONIC_RAW,&current);
-					float diff_time = ((current.tv_sec - start.tv_sec) * 1000000 + (current.tv_nsec - start.tv_nsec) / 1000)/1000000.0;
-					printf("Total time: %f\n", diff_time);
-					updates_per_sec = (float)update_msg_count/diff_time;
-					printf("RIB-out (updates/second): %f\n",updates_per_sec);
-					printf("Total prefixes received: %d\n",prefix_count);
-					close(sockfd);
-					exit(EXIT_SUCCESS);
-				};
-				break;
-			case 3: 
-				printf("Notification message received\n");
-				close(sockfd);
-				exit(EXIT_FAILURE);	
-			case 4:
-				printf("Keepalive received\n");
-				break;
-			default:
-				printf("Illegal message type %d received\n",rx_hdr->type);
-				printf("%ld total updates received\n",update_msg_count);
-				printf("%ld total update bytes received\n",update_byte_count);
-				clock_gettime(CLOCK_MONOTONIC_RAW,&current);
-				int diff_time = (current.tv_sec - start.tv_sec) * 1000000 + (current.tv_nsec - start.tv_nsec) / 1000;
-				printf("Total time: %d\n", diff_time);
-				exit(EXIT_FAILURE);
+				puts("Sending keepalive");
+			}
 		}
-		clock_gettime(CLOCK_MONOTONIC_RAW,&current);
-		
-		if((current.tv_sec - last_keepalive.tv_sec) > keepalive_interval) {
-			if(send(sockfd, keepalive_msg, sizeof(struct keepalive_message), 0) < sizeof(struct keepalive_message)) {
-				printf("send keepalive failed\n");
-				exit(EXIT_FAILURE);
-			};
-			clock_gettime(CLOCK_MONOTONIC_RAW,&last_keepalive);
-			puts("Sending keepalive");
-		}
-		
-		
 	}
+	printf("Completed running %d cycles\n",cycles);
+	printf("Average prefix count received per cycle %.2f\n",total_prefix_count/(float)cycles);
+	float time_variance = get_variance(diff_times,(total_diff_time/(float)cycles),(sizeof(diff_times)/sizeof(diff_times[0])));
+	float update_per_sec_variance = get_variance(updates_per_sec_arr,(total_updates_per_sec/(float)cycles),(sizeof(updates_per_sec_arr)/sizeof(updates_per_sec_arr[0])));
+	
+	printf("Average time (seconds) per cycle: %f Variance: %f Standard Deviation: %f\n",total_diff_time/(float)cycles,time_variance,sqrt(time_variance));
+	
+	printf("Average RIB-out per cycle %f Variance: %f Standard Deviation: %f\n",(total_updates_per_sec/(float)cycles),update_per_sec_variance,sqrt(update_per_sec_variance));
 	close(sockfd);
 	exit(EXIT_SUCCESS);
 }

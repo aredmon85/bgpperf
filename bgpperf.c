@@ -9,8 +9,6 @@
 #include <ctype.h>
 #include <unistd.h>
 #include <getopt.h>
-#include <netinet/udp.h>
-#include <netinet/ip.h>
 #include <time.h>
 #include <arpa/inet.h>
 #include <errno.h>

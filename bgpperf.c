@@ -302,7 +302,7 @@ int main(int argc, char *argv[]) {
 
 	float diff_times[cycles];
 	float updates_per_sec_arr[cycles];
-	printf("Attempting to connect to %s with a local ASN of %d and a MSS of %d for %d cycles\n",destination,local_asn,mss,cycles); 
+	printf("Connecting to %s with a local ASN of %d and a MSS of %d for %d cycles with %d seconds between each cycle\n",destination,local_asn,mss,cycles,pause); 
 	uint8_t session;
 	for(int current_cycle=0; current_cycle<cycles; current_cycle++) {
 		session = 1;
@@ -359,17 +359,13 @@ int main(int argc, char *argv[]) {
 					update_msg_count++;
 					update_byte_count = update_byte_count + ntohs(rx_hdr->len) - sizeof(struct header);
 					if(ntohs(rx_hdr->len) == 23) {
-						//puts("###EOR Received!!!###");
-						//printf("%ld total updates received\n",update_msg_count);
-						//printf("%ld total update bytes received\n",update_byte_count);
+						//###EOR Received!!!;
 						printf("Complete!\n");
 						clock_gettime(CLOCK_MONOTONIC_RAW,&current);
 						diff_time = ((current.tv_sec - start.tv_sec) * 1000000 + (current.tv_nsec - start.tv_nsec) / 1000)/1000000.0;
-						//printf("Total time: %f\n", diff_time);
 						diff_times[current_cycle] = diff_time;
 						updates_per_sec = (float)update_msg_count/diff_time;
 						updates_per_sec_arr[current_cycle] = updates_per_sec;
-						//printf("Total prefixes received: %d\n",prefix_count);
 						total_prefix_count = total_prefix_count + prefix_count;
 						total_update_msg_count = total_update_msg_count + update_msg_count;
 						total_diff_time = diff_time + total_diff_time;

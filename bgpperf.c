@@ -82,9 +82,14 @@ struct eor_message {
 	uint16_t total_pa_len;
 } __attribute__((packed));
 
+struct notification_message {
+	uint8_t code;
+	uint8_t subcode;
+	char data[48];
+} __attribute__((packed));
 
 void print_usage() {
-	printf("Usage: bgpperf <PEER_ADDRESS> <LOCAL_ASN> -s SOURCE_ADDRESS -c CYCLES -m MSS\n");
+	printf("Usage: bgpperf <PEER_ADDRESS> <LOCAL_ASN> -c Repetitions (cycles) to run -m MSS -w Wait time (seconds) between cycles\n");
 }
 float get_variance(float valarr[], float avg, int vals) {
 	float variance = 0.0;
@@ -116,6 +121,14 @@ void handle_open_message(int sockfd, struct header *hdr, struct open_message *rx
                 printf("handle_open_message: Recv failed\n");
                 exit(EXIT_FAILURE);
         };
+}
+void handle_notification_message(int sockfd, struct header *hdr, struct notification_message *notification_msg) {
+	if(recv(sockfd, notification_msg, sizeof(struct notification_message),0) < 0) {
+		printf("handle_notification_message: Recv failed:  %s\n", strerror(errno));                
+                exit(EXIT_FAILURE);
+	};
+	printf("Notification code: %d\n",notification_msg->code);
+	printf("Notification subcode: %d\n",notification_msg->subcode);
 }
 static inline uint16_t get_byte_length(uint16_t prefix_len) {
 	if(prefix_len > 24) {
@@ -170,8 +183,9 @@ int main(int argc, char *argv[]) {
 	uint32_t local_asn;
 	char* destination;
 	int option = 0;
+	uint8_t pause = 0;
 	struct timespec start, current, last_keepalive;
-	while((option = getopt(argc, argv, "p:c:m:h:")) != -1) {
+	while((option = getopt(argc, argv, "p:c:m:w:h:")) != -1) {
 		switch(option) {
 			break;
 			case 'c':
@@ -179,6 +193,13 @@ int main(int argc, char *argv[]) {
 			break;
 			case 'm':
 			mss = atoi(optarg);
+			break;
+			case 'w':
+			pause = atoi(optarg);
+			if(pause < 0 || pause > 30){
+				printf("Wait time between cycles must be between 1 and 30 seconds");
+				exit(EXIT_FAILURE);
+			};
 			break;
 			case 'h':
 			print_usage();
@@ -302,8 +323,9 @@ int main(int argc, char *argv[]) {
 		update_msg_count = 0;
 		update_byte_count = 0;	
 		struct open_message *rx_open_msg = (struct open_message *)malloc(sizeof(struct open_message));
-
 		struct header *rx_hdr = (struct header *)malloc(sizeof(struct header));
+		struct notification_message *notification_msg = (struct notification_message *)malloc(sizeof(struct notification_message));
+
 		updates_per_sec = 0.0;
 		prefix_count = 0;
 		while(session == 1) {
@@ -357,7 +379,8 @@ int main(int argc, char *argv[]) {
 					};
 					break;
 				case 3: 
-					printf("Notification message received\n");
+					printf("\nNotification message received\n");
+					handle_notification_message(sockfd,rx_hdr,notification_msg);
 					close(sockfd);
 					exit(EXIT_FAILURE);	
 				case 4:
@@ -382,6 +405,7 @@ int main(int argc, char *argv[]) {
 				puts("Sending keepalive");
 			}
 		}
+		sleep(pause);
 	}
 	printf("Completed running %d cycles\n",cycles);
 	printf("Average prefix count received per cycle %.2f\n",total_prefix_count/(float)cycles);
